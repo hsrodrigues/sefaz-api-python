@@ -10,6 +10,11 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
+# Adicione isso logo abaixo de app = Flask(__name__)
+@app.route('/healthcheck', methods=['GET'])
+def healthcheck():
+    return "OK", 200
+
 estrategia_retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adaptador = HTTPAdapter(max_retries=estrategia_retry)
 sessao = requests.Session()
