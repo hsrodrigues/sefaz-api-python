@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify
 import requests
 from requests.adapters import HTTPAdapter
@@ -5,7 +6,7 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import urllib3
 
-# Desativa os avisos de certificado inseguro
+# Desativa os avisos de certificado inseguro do governo
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -13,15 +14,13 @@ app = Flask(__name__)
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DE RESILIÊNCIA (O "Coração" da estabilidade)
 # ---------------------------------------------------------
-# Cria uma estratégia de repetição inteligente
 estrategia_retry = Retry(
-    total=5,                # Tenta até 5 vezes antes de desistir
-    backoff_factor=1,       # Tempo de espera crescente: 1s, 2s, 4s, 8s...
-    status_forcelist=[429, 500, 502, 503, 504], # Erros clássicos de servidor que disparam a nova tentativa
+    total=5,                
+    backoff_factor=1,       
+    status_forcelist=[429, 500, 502, 503, 504], 
     allowed_methods=["GET"]
 )
 
-# Acopla a estratégia em uma Sessão do requests
 adaptador = HTTPAdapter(max_retries=estrategia_retry)
 sessao = requests.Session()
 sessao.mount("https://", adaptador)
@@ -41,8 +40,6 @@ def get_status_sefaz():
     try:
         print("Buscando dados na SEFAZ de forma segura...")
         
-        # Usamos a 'sessao' blindada em vez do requests normal
-        # Colocamos um timeout de 20 segundos (tempo máximo que ele espera uma resposta única)
         response = sessao.get(url, headers=headers, verify=False, timeout=20)
         response.raise_for_status() 
 
@@ -95,7 +92,15 @@ def get_status_sefaz():
         print(f"Erro inesperado: {e}")
         return jsonify({"sucesso": False, "erro": "Falha ao buscar dados", "detalhe": str(e)}), 500
 
+# ==========================================
+# 👇 MUDANÇAS CRÍTICAS PARA O RENDER AQUI 👇
+# ==========================================
 if __name__ == '__main__':
-    print("✅ API Python Blindada rodando!")
-    print("👉 Acesse: http://127.0.0.1:3000/api/status")
-    app.run(port=3000, debug=True)
+    # O Render injeta uma porta dinâmica através do "os.environ"
+    # Se não achar (rodando local), ele usa a 3000 como backup
+    port = int(os.environ.get("PORT", 3000))
+    
+    # O host "0.0.0.0" diz ao Python para liberar o acesso para a internet externa
+    # O debug=False é obrigatório em produção por segurança
+    print(f"✅ Iniciando servidor na porta {port}...")
+    app.run(host="0.0.0.0", port=port, debug=False)
