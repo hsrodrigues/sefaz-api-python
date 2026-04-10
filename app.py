@@ -1,68 +1,107 @@
-import os
-import urllib.parse
-from flask import Flask, jsonify
+import time
+import threading
+import random
 import requests
 from bs4 import BeautifulSoup
-import urllib3
+from flask import Flask, jsonify
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
-def traduz_status(td_element):
-    if not td_element: return "Pendente"
-    img_tag = td_element.find('img')
-    if not img_tag: return "Pendente"
-    src = img_tag.get('src', '')
-    if 'verde' in src: return "Normal"
-    if 'amarela' in src: return "Instavel"
-    if 'vermelha' in src: return "Inativo"
-    return "Pendente"
+# Memória RAM do servidor
+status_oficial_sefaz = {} # Guarda a cor real das bolinhas
+banco_de_dados_app = {}   # Guarda o histórico do gráfico para o App
+ultima_att = "--:--:--"
 
-@app.route('/api/status', methods=['GET'])
-def get_status_sefaz():
-    url_alvo = 'https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx'
-    url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url_alvo)}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+def scraper_oficial_sefaz():
+    """Motor 1: Lê o site da SEFAZ a cada 3 minutos para não ser banido"""
+    global status_oficial_sefaz, ultima_att
+    url = "http://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
 
-    try:
-        # Usa o proxy só para ler a tabela sem tomar bloqueio
-        res = requests.get(url_proxy, headers=headers, timeout=15)
-        html = res.json().get('contents', '') if res.status_code == 200 else requests.get(url_alvo, verify=False, timeout=10).text
+    while True:
+        try:
+            req = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(req.text, 'html.parser')
+            tabela = soup.find('table', {'class': 'tabelaListagemDados'})
+            
+            if tabela:
+                linhas = tabela.find_all('tr')[1:] # Pula o cabeçalho
+                for linha in linhas:
+                    colunas = linha.find_all('td')
+                    if len(colunas) >= 6:
+                        autorizador = colunas[0].text.strip()
+                        
+                        # Pega todas as bolinhas da linha (Autorização, Consulta, etc)
+                        bolinhas = [td.find('img')['src'] for td in colunas[1:] if td.find('img')]
+                        
+                        # Lógica implacável: Se tem uma vermelha, caiu. Se tem amarela, instável.
+                        if any('vermelha' in b for b in bolinhas):
+                            status = "FALHA"
+                        elif any('amarela' in b for b in bolinhas):
+                            status = "INSTÁVEL"
+                        else:
+                            status = "OPERACIONAL"
+                            
+                        status_oficial_sefaz[autorizador] = status
+                
+                ultima_att = time.strftime("%H:%M:%S")
+                print(f"[{ultima_att}] SEFAZ Sincronizada com sucesso.")
+        except Exception as e:
+            print("Erro ao ler SEFAZ:", e)
+            
+        time.sleep(180) # Aguarda 3 minutos
 
-        soup = BeautifulSoup(html, 'html.parser')
-        tabela = soup.find('table', class_='tabelaListagemDados')
+def gerador_de_pulsos_fintech():
+    """Motor 2: Roda a cada 10 segundos para dar vida ao gráfico do app"""
+    global banco_de_dados_app
+    while True:
+        for autorizador, status in status_oficial_sefaz.items():
+            if autorizador not in banco_de_dados_app:
+                banco_de_dados_app[autorizador] = {"historico": []}
+            
+            # Gera a latência visual baseada na realidade
+            if status == "OPERACIONAL":
+                latencia = random.randint(15, 65)  # Gráfico baixo e saudável
+            elif status == "INSTÁVEL":
+                latencia = random.randint(150, 300) # Gráfico alto e nervoso
+            else:
+                latencia = random.randint(400, 600) # Gráfico estourado (Caiu)
+            
+            # Atualiza o histórico
+            hist = banco_de_dados_app[autorizador]["historico"]
+            hist.append(latencia)
+            if len(hist) > 30: # Mantém só os últimos 30 pontos
+                hist.pop(0)
+            
+            banco_de_dados_app[autorizador]["latencia_ms"] = latencia
+            banco_de_dados_app[autorizador]["status_geral"] = status
+            
+        time.sleep(10) # Pulso a cada 10s
 
-        if not tabela:
-            raise ValueError("Não foi possível carregar a tabela.")
+# Inicia os dois motores simultaneamente em background
+threading.Thread(target=scraper_oficial_sefaz, daemon=True).start()
+threading.Thread(target=gerador_de_pulsos_fintech, daemon=True).start()
 
-        linhas = tabela.find_all('tr')[1:]
-        dados = []
-
-        for linha in linhas:
-            cols = linha.find_all('td')
-            if len(cols) < 6: continue
-
-            autorizador = cols[0].text.strip()
-            todos_status = [traduz_status(cols[i]) for i in range(1, 6)]
-            status_geral = "INATIVO" if "Inativo" in todos_status else "INSTÁVEL" if "Instavel" in todos_status else "OPERACIONAL"
-
-            dados.append({
-                "autorizador": autorizador,
-                "status_geral": status_geral,
-                "latencia_local_ms": 0, # 🚨 Mandamos 0, porque o Celular é quem vai preencher isso!
-                "servicos": {
-                    "autorizacao": todos_status[0],
-                    "retorno": todos_status[1],
-                    "inutilizacao": todos_status[2],
-                    "consulta": todos_status[3],
-                    "status_servico": todos_status[4]
-                }
-            })
-
-        return jsonify({"sucesso": True, "latencia_real_ms": 0, "dados": dados})
-
-    except Exception as e:
-        return jsonify({"sucesso": False, "mensagem": str(e), "dados": []}), 500
+@app.route('/api/status_v2', methods=['GET'])
+def api_status():
+    """Endpoint super rápido que o Android vai consumir"""
+    dados_formatados = []
+    for aut, info in banco_de_dados_app.items():
+        dados_formatados.append({
+            "autorizador": aut,
+            "status_geral": info["status_geral"],
+            "latencia_ms": info["latencia_ms"],
+            "historico": info["historico"]
+        })
+    
+    # Ordenar alfabeticamente igual ao site
+    dados_formatados = sorted(dados_formatados, key=lambda x: x["autorizador"])
+    
+    return jsonify({
+        "sucesso": len(dados_formatados) > 0,
+        "timestamp": ultima_att,
+        "dados": dados_formatados
+    })
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
+    app.run(host='0.0.0.0', port=5000)
