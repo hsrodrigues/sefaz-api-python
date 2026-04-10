@@ -1,7 +1,8 @@
 import os
 import time
 import concurrent.futures
-import threading # 🚨 NOVO: Para rodar em segundo plano
+import threading
+import urllib.parse
 from flask import Flask, jsonify
 import requests
 from requests.adapters import HTTPAdapter
@@ -9,15 +10,15 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import urllib3
 
+# Desativa avisos de certificados SSL do governo
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 # 🚨 A NOSSA GAVETA DE MEMÓRIA (CACHE)
-# A API vai entregar isso aqui instantaneamente quando o celular pedir
 CACHE_SEFAZ = {
     "sucesso": False,
     "latencia_real_ms": 0,
-    "mensagem": "Servidor aquecendo... tente em 5 segundos.",
+    "mensagem": "Servidor aquecendo a turbina anti-bloqueio... tente em 5 segundos.",
     "dados": []
 }
 
@@ -25,11 +26,13 @@ CACHE_SEFAZ = {
 def healthcheck():
     return "OK", 200
 
+# Configuração de conexão com tentativas automáticas
 estrategia_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adaptador = HTTPAdapter(max_retries=estrategia_retry)
 sessao = requests.Session()
 sessao.mount("https://", adaptador)
 
+# URLs diretas para tentar o ping local de cada estado
 URLS_SEFAZ = {
     "AM": "https://sistemas.sefaz.am.gov.br",
     "BA": "https://nfe.sefaz.ba.gov.br",
@@ -53,6 +56,7 @@ def ping_estado(autorizador):
     if not url: return autorizador, 0
     try:
         inicio = time.time()
+        # Bate na porta do estado bem rápido (1.5s). Se enrolar, retorna 0.
         sessao.head(url, verify=False, timeout=1.5) 
         return autorizador, int((time.time() - inicio) * 1000)
     except:
@@ -68,23 +72,36 @@ def traduz_status(td_element):
     if 'vermelha' in src: return "Inativo"
     return "Pendente"
 
-# 🚨 O MOTOR QUE RODA EM SEGUNDO PLANO SEM PARAR
+# 🚨 MOTOR QUE RODA EM SEGUNDO PLANO SEM PARAR (ANTI-BLOQUEIO)
 def trabalhador_de_fundo():
     global CACHE_SEFAZ
-    url_nacional = 'https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx'
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
+    
+    url_alvo = 'https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx'
+    # Usando o Proxy AllOrigins para a SEFAZ não bloquear o IP do Render
+    url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url_alvo)}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
     while True:
         try:
             inicio_ping_global = time.time()
-            response = sessao.get(url_nacional, headers=headers, verify=False, timeout=10)
+            
+            # Pede pro Proxy buscar o HTML da SEFAZ
+            response = sessao.get(url_proxy, headers=headers, timeout=20)
             response.raise_for_status() 
+            
+            # O proxy devolve um JSON. O HTML do governo fica dentro de "contents"
+            dados_proxy = response.json()
+            html_governo = dados_proxy.get('contents', '')
+            
             latencia_global_ms = int((time.time() - inicio_ping_global) * 1000)
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(html_governo, 'html.parser')
             tabela = soup.find('table', class_='tabelaListagemDados')
-            linhas = tabela.find_all('tr')[1:] 
+            
+            if not tabela:
+                raise ValueError("O Proxy não conseguiu ler a tabela da SEFAZ")
 
+            linhas = tabela.find_all('tr')[1:] 
             dados_brutos = []
             autorizadores_encontrados = []
 
@@ -118,8 +135,9 @@ def trabalhador_de_fundo():
                     }
                 })
 
+            # Dispara os pings locais (reduzi de 20 para 5 trabalhadores para não irritar os servidores locais)
             latencias_locais = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 resultados = executor.map(ping_estado, autorizadores_encontrados)
                 for estado, latencia in resultados:
                     latencias_locais[estado] = latencia
@@ -127,11 +145,12 @@ def trabalhador_de_fundo():
             status_sefaz_final = []
             for dado in dados_brutos:
                 ping_do_estado = latencias_locais.get(dado["autorizador"], 0)
+                # Se o estado não responder ao ping direto, usa a latência do proxy como base
                 if ping_do_estado == 0: ping_do_estado = latencia_global_ms
                 dado["latencia_local_ms"] = ping_do_estado
                 status_sefaz_final.append(dado)
 
-            # 🚨 ATUALIZA A GAVETA (CACHE) COM OS DADOS FRESQUINHOS
+            # 🚨 ATUALIZA A GAVETA COM OS DADOS PRONTOS
             CACHE_SEFAZ = {
                 "sucesso": True,
                 "latencia_real_ms": latencia_global_ms,
@@ -140,16 +159,22 @@ def trabalhador_de_fundo():
             }
 
         except Exception as e:
-            print(f"Erro na varredura de fundo: {e}")
+            # Se a SEFAZ ou o Proxy falharem, avisa na gaveta
+            CACHE_SEFAZ = {
+                "sucesso": False,
+                "latencia_real_ms": 0,
+                "mensagem": f"Aguardando Governo/Proxy: {str(e)}",
+                "dados": []
+            }
         
-        # O servidor descansa 15 segundos e faz toda a varredura de novo
-        time.sleep(15)
+        # Pausa de 30 segundos entre as varreduras (pra não levar ban do Proxy)
+        time.sleep(30)
 
-# 🚨 LIGA O TRABALHADOR DE FUNDO ANTES DA API LIGAR
+# Inicia o motor de fundo assim que o servidor liga
 thread_fundo = threading.Thread(target=trabalhador_de_fundo, daemon=True)
 thread_fundo.start()
 
-# 🚨 A ROTA DA API AGORA É INSTANTÂNEA. ELA SÓ ENTREGA A GAVETA.
+# 🚨 A ROTA DA SUA API: Agora ela só entrega o que está na gaveta (Instantâneo)
 @app.route('/api/status', methods=['GET'])
 def get_status_sefaz():
     return jsonify(CACHE_SEFAZ)
