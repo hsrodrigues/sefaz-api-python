@@ -6,32 +6,38 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import httpx
 from bs4 import BeautifulSoup
 
-# --- CONFIGURAÇÃO DE LOGS ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("SefazMonitor")
 
-# --- MODELOS DE DADOS ---
+# --- MODELOS DE DADOS ATUALIZADOS ---
+class SefazServicosModel(BaseModel):
+    autorizacao: str
+    retorno: str
+    inutilizacao: str
+    consulta: str
+    status_servico: str
+
 class SefazStatusModel(BaseModel):
     autorizador: str
     status_geral: str
     latencia_ms: int
     historico: list[int]
+    servicos: SefazServicosModel
 
 class SefazResponseModel(BaseModel):
     sucesso: bool
     timestamp: str
     dados: list[SefazStatusModel]
 
-# --- CACHE EM MEMÓRIA ---
 class SefazCache:
     def __init__(self):
-        self.official_status: dict[str, str] = {}
-        self.app_data: dict[str, dict] = {}
-        self.last_update: str = "--:--:--"
+        self.official_status = {}
+        self.app_data = {}
+        self.last_update = "--:--:--"
 
     def get_formatted_data(self) -> list[dict]:
         dados = [
@@ -39,7 +45,8 @@ class SefazCache:
                 "autorizador": aut,
                 "status_geral": info["status_geral"],
                 "latencia_ms": info["latencia_ms"],
-                "historico": info["historico"]
+                "historico": info["historico"],
+                "servicos": info["servicos"]
             }
             for aut, info in self.app_data.items()
         ]
@@ -47,13 +54,21 @@ class SefazCache:
 
 cache = SefazCache()
 
-# --- MOTORES DE FUNDO (WORKERS) ---
+def extrair_cor(td_html):
+    img = td_html.find('img')
+    if not img: return "Desconhecido"
+    src = img['src']
+    if 'verde' in src: return "Normal"
+    if 'amarela' in src: return "Instável"
+    if 'vermelha' in src: return "Falha"
+    return "Desconhecido"
+
 async def worker_scraper_sefaz():
-    """Lê o site da SEFAZ a cada 3 minutos para não ser bloqueado"""
     url = "https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0'}
     
-   timeout = httpx.Timeout(15.0)
+    timeout = httpx.Timeout(15.0)
+    # 🚨 Linha corrigida com indentação perfeita e redirecionamento ativado
     async with httpx.AsyncClient(verify=False, timeout=timeout, headers=headers, follow_redirects=True) as client:
         while True:
             try:
@@ -68,28 +83,39 @@ async def worker_scraper_sefaz():
                         colunas = linha.find_all('td')
                         if len(colunas) >= 6:
                             autorizador = colunas[0].text.strip()
-                            bolinhas = [td.find('img')['src'] for td in colunas[1:] if td.find('img')]
+                            s_aut = extrair_cor(colunas[1])
+                            s_ret = extrair_cor(colunas[2])
+                            s_inu = extrair_cor(colunas[3])
+                            s_con = extrair_cor(colunas[4])
+                            s_sta = extrair_cor(colunas[5])
                             
-                            if any('vermelha' in b for b in bolinhas): status = "FALHA"
-                            elif any('amarela' in b for b in bolinhas): status = "INSTÁVEL"
-                            else: status = "OPERACIONAL"
-                                
-                            cache.official_status[autorizador] = status
+                            geral = "OPERACIONAL"
+                            status_list = [s_aut, s_ret, s_inu, s_con, s_sta]
+                            if any(s == "Instável" for s in status_list): geral = "INSTÁVEL"
+                            if any(s == "Falha" for s in status_list): geral = "FALHA"
+                            
+                            cache.official_status[autorizador] = {
+                                "geral": geral,
+                                "servicos": {
+                                    "autorizacao": s_aut, "retorno": s_ret, 
+                                    "inutilizacao": s_inu, "consulta": s_con, "status_servico": s_sta
+                                }
+                            }
                     
                     cache.last_update = datetime.now().strftime("%H:%M:%S")
                     logger.info("SEFAZ Sincronizada com sucesso.")
             except Exception as e:
-                logger.error(f"Erro ao ler SEFAZ: {str(e)}")
+                logger.error(f"Erro no Scraper: {str(e)}")
             
-            await asyncio.sleep(180) # Aguarda 3 minutos
+            await asyncio.sleep(180)
 
 async def worker_gerador_pulsos():
-    """Gera o 'batimento cardíaco' do gráfico para o App Android a cada 10s"""
     while True:
-        for autorizador, status in cache.official_status.items():
+        for autorizador, data in cache.official_status.items():
             if autorizador not in cache.app_data:
                 cache.app_data[autorizador] = {"historico": []}
             
+            status = data["geral"]
             if status == "OPERACIONAL": latencia = random.randint(15, 65)
             elif status == "INSTÁVEL": latencia = random.randint(150, 300)
             else: latencia = random.randint(400, 600)
@@ -98,12 +124,14 @@ async def worker_gerador_pulsos():
             hist.append(latencia)
             if len(hist) > 30: hist.pop(0)
             
-            cache.app_data[autorizador]["latencia_ms"] = latencia
-            cache.app_data[autorizador]["status_geral"] = status
+            cache.app_data[autorizador].update({
+                "latencia_ms": latencia,
+                "status_geral": status,
+                "servicos": data["servicos"]
+            })
             
         await asyncio.sleep(10)
 
-# --- INICIALIZAÇÃO DA API ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task_scraper = asyncio.create_task(worker_scraper_sefaz())
@@ -114,18 +142,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Sefaz Monitor API", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/api/status", response_model=SefazResponseModel)
 async def get_sefaz_status():
     dados_formatados = cache.get_formatted_data()
-    return SefazResponseModel(
-        sucesso=len(dados_formatados) > 0,
-        timestamp=cache.last_update,
-        dados=dados_formatados
-    )
+    return SefazResponseModel(sucesso=len(dados_formatados) > 0, timestamp=cache.last_update, dados=dados_formatados)
