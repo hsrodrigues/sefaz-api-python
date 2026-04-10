@@ -68,7 +68,6 @@ async def worker_scraper_sefaz():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0'}
     
     timeout = httpx.Timeout(15.0)
-    # 🚨 Linha corrigida com indentação perfeita e redirecionamento ativado
     async with httpx.AsyncClient(verify=False, timeout=timeout, headers=headers, follow_redirects=True) as client:
         while True:
             try:
@@ -102,8 +101,9 @@ async def worker_scraper_sefaz():
                                 }
                             }
                     
-                   fuso_brasil = timezone(timedelta(hours=-3))
-cache.last_update = datetime.now(fuso_brasil).strftime("%H:%M:%S")
+                    # 🚨 Horário de Brasília alinhado perfeitamente
+                    fuso_brasil = timezone(timedelta(hours=-3))
+                    cache.last_update = datetime.now(fuso_brasil).strftime("%H:%M:%S")
                     logger.info("SEFAZ Sincronizada com sucesso.")
             except Exception as e:
                 logger.error(f"Erro no Scraper: {str(e)}")
