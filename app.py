@@ -43,10 +43,10 @@ def ping_estado(autorizador):
     """Bate no servidor do estado e mede os milissegundos."""
     url = URLS_SEFAZ.get(autorizador)
     if not url: return autorizador, 0
-    try:
+  try:
         inicio = time.time()
-        # Usamos HEAD em vez de GET para não baixar o site todo, apenas testar a rede
-        sessao.head(url, verify=False, timeout=3.0) 
+        # 🚨 Cortou pela metade! Se a SEFAZ enrolar mais que 1.5s, ele chuta a porta e manda 0ms
+        sessao.head(url, verify=False, timeout=1.5) 
         return autorizador, int((time.time() - inicio) * 1000)
     except:
         return autorizador, 0 # Se o servidor do estado recusar a conexão, retorna 0
