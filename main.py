@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -102,7 +102,8 @@ async def worker_scraper_sefaz():
                                 }
                             }
                     
-                    cache.last_update = datetime.now().strftime("%H:%M:%S")
+                   fuso_brasil = timezone(timedelta(hours=-3))
+cache.last_update = datetime.now(fuso_brasil).strftime("%H:%M:%S")
                     logger.info("SEFAZ Sincronizada com sucesso.")
             except Exception as e:
                 logger.error(f"Erro no Scraper: {str(e)}")
