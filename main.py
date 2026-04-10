@@ -53,8 +53,8 @@ async def worker_scraper_sefaz():
     url = "https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     
-    timeout = httpx.Timeout(15.0)
-    async with httpx.AsyncClient(verify=False, timeout=timeout, headers=headers) as client:
+   timeout = httpx.Timeout(15.0)
+    async with httpx.AsyncClient(verify=False, timeout=timeout, headers=headers, follow_redirects=True) as client:
         while True:
             try:
                 response = await client.get(url)
